@@ -3,7 +3,10 @@
 from __future__ import annotations
 import argparse
 import json
+import os
 import re
+import zipfile
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Dict, List
 END_USE_COLUMNS = [
@@ -65,6 +68,45 @@ LV_I_ROW_PATTERN = re.compile(
 )
 LV_I_UVALUE_UNIT_PATTERN = re.compile(r"U-VALUE\s*\(([^\)]+)\)", re.IGNORECASE)
 LS_A_LOAD_UNIT_PATTERN = re.compile(r"COOLING LOAD\s*\(([^\)]+)\)", re.IGNORECASE)
+MAIN_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+NS = {"m": MAIN_NS}
+MASTER_ROOM_LIST_SHEET_XML_PATH = "xl/worksheets/sheet1.xml"
+MASTER_ROOM_LIST_SPACE_START_ROW = 16
+MASTER_ROOM_LIST_SPACE_MAX_ROWS = 50
+ECM_DATA_SHEET_XML_PATH = "xl/worksheets/sheet10.xml"
+ECM_DATA_MODEL_START_ROWS = {
+    "BASELINE": 4,
+    "PROPOSED": 34,
+    "ECM-1": 44,
+    "ECM-2": 54,
+    "ECM-3": 64,
+    "ECM-4": 74,
+    "ECM-5": 84,
+    "ECM-6": 94,
+    "ECM-7": 104,
+}
+BEPS_TO_ECM_END_USE_COLUMNS = {
+    "LIGHTS": "B",  # Internal Lighting
+    "EXT USAGE": "C",  # External Lighting
+    "SPACE HEATING": "D",
+    "SPACE COOLING": "E",
+    "PUMPS & AUX": "F",
+    "VENT FANS": "H",  # Fans Interior
+    "DOMEST HOT WTR": "J",
+    "MISC EQUIP": "K",  # Receptacle Equipment
+    "TASK LIGHTS": "L",  # Interior Lighting Process
+    "REFRIG DISPLAY": "M",
+    "HEAT REJECT": "Q",
+}
+ECM_OPTIONAL_BLANK_COLUMNS = ["G", "I", "N", "O", "P", "R", "S", "T"]
+KBTU_PER_UNIT = {
+    "KWH": 3.412,
+    "THERM": 100.0,
+    "KBTU": 1.0,
+    "MBTU": 1000.0,
+    "MMBTU": 1000.0,
+    "BTU": 0.001,
+}
 def _clean_number(value: str) -> float:
     return float(value.replace(",", ""))
 def _parse_values_line(line: str) -> tuple[str, List[float]]:
@@ -429,6 +471,321 @@ def convert_value(value: float, from_unit: str, to_unit: str, conversions: Dict[
             if next_unit not in visited:
                 queue.append((next_unit, next_value))
     raise ValueError(f"No conversion path found from '{from_unit}' to '{to_unit}'.")
+
+
+def _ensure_row(sheet_data: ET.Element, row_number: int) -> ET.Element:
+    row = sheet_data.find(f"m:row[@r='{row_number}']", NS)
+    if row is not None:
+        return row
+    row = ET.Element(f"{{{MAIN_NS}}}row", {"r": str(row_number)})
+    inserted = False
+    for existing in sheet_data.findall("m:row", NS):
+        if int(existing.attrib["r"]) > row_number:
+            sheet_data.insert(list(sheet_data).index(existing), row)
+            inserted = True
+            break
+    if not inserted:
+        sheet_data.append(row)
+    return row
+
+
+def _set_inline_string_cell(row: ET.Element, cell_ref: str, value: str, style: str | None = None) -> None:
+    cell = row.find(f"m:c[@r='{cell_ref}']", NS)
+    if cell is None:
+        attrs = {"r": cell_ref}
+        if style is not None:
+            attrs["s"] = style
+        cell = ET.SubElement(row, f"{{{MAIN_NS}}}c", attrs)
+    elif style is not None and "s" not in cell.attrib:
+        cell.attrib["s"] = style
+    for child in list(cell):
+        cell.remove(child)
+    cell.attrib["t"] = "inlineStr"
+    is_node = ET.SubElement(cell, f"{{{MAIN_NS}}}is")
+    text_node = ET.SubElement(is_node, f"{{{MAIN_NS}}}t")
+    text_node.text = value
+
+
+def _set_numeric_cell(row: ET.Element, cell_ref: str, value: float | None, style: str | None = None) -> None:
+    cell = row.find(f"m:c[@r='{cell_ref}']", NS)
+    if cell is None:
+        attrs = {"r": cell_ref}
+        if style is not None:
+            attrs["s"] = style
+        cell = ET.SubElement(row, f"{{{MAIN_NS}}}c", attrs)
+    elif style is not None and "s" not in cell.attrib:
+        cell.attrib["s"] = style
+    for child in list(cell):
+        cell.remove(child)
+    cell.attrib.pop("t", None)
+    if value is not None:
+        v_node = ET.SubElement(cell, f"{{{MAIN_NS}}}v")
+        v_node.text = f"{value:.6f}".rstrip("0").rstrip(".")
+
+
+def _load_zip_file_map(workbook_path: Path) -> Dict[str, bytes]:
+    with zipfile.ZipFile(workbook_path, "r") as workbook_zip:
+        return {name: workbook_zip.read(name) for name in workbook_zip.namelist()}
+
+
+def _save_zip_file_map(file_map: Dict[str, bytes], output_workbook_path: Path) -> None:
+    with zipfile.ZipFile(output_workbook_path, "w", compression=zipfile.ZIP_DEFLATED) as dst_zip:
+        for name, payload in file_map.items():
+            dst_zip.writestr(name, payload)
+
+
+def _to_kbtu(value: float, from_unit: str) -> float:
+    normalized_unit = from_unit.upper().strip()
+    if normalized_unit not in KBTU_PER_UNIT:
+        raise ValueError(f"Unsupported unit conversion to kBtu from '{from_unit}'.")
+    return value * KBTU_PER_UNIT[normalized_unit]
+
+
+def _load_master_room_list_sheet(workbook_path: Path) -> ET.Element:
+    with zipfile.ZipFile(workbook_path, "r") as workbook_zip:
+        try:
+            sheet_xml = workbook_zip.read(MASTER_ROOM_LIST_SHEET_XML_PATH)
+        except KeyError as exc:
+            raise ValueError("Could not find Master Room List worksheet XML in the workbook.") from exc
+    return ET.fromstring(sheet_xml)
+
+
+def _read_cell_text(row: ET.Element, cell_ref: str) -> str:
+    cell = row.find(f"m:c[@r='{cell_ref}']", NS)
+    if cell is None:
+        return ""
+    if cell.attrib.get("t") == "inlineStr":
+        text_parts = [node.text or "" for node in cell.findall(".//m:t", NS)]
+        return "".join(text_parts)
+    value_node = cell.find("m:v", NS)
+    return value_node.text.strip() if value_node is not None and value_node.text else ""
+
+
+def _read_cell_float(row: ET.Element, cell_ref: str) -> float | None:
+    cell = row.find(f"m:c[@r='{cell_ref}']", NS)
+    if cell is None:
+        return None
+    value_node = cell.find("m:v", NS)
+    if value_node is None or value_node.text is None or not value_node.text.strip():
+        return None
+    try:
+        return float(value_node.text.strip())
+    except ValueError:
+        return None
+
+
+def populate_master_room_list_space_type_table(
+    sim_text: str,
+    workbook_path: Path,
+    output_workbook_path: Path,
+) -> Dict[str, object]:
+    """Populate Master Room List 'Space Type Table' with LV-B space names and areas."""
+    lv_b_result = extract_lv_b_spaces(sim_text)
+    spaces = list(lv_b_result["spaces"].items())
+    if not spaces:
+        raise ValueError("No LV-B spaces found to populate the Master Room List.")
+    ET.register_namespace("", MAIN_NS)
+    file_map = _load_zip_file_map(workbook_path)
+    if MASTER_ROOM_LIST_SHEET_XML_PATH not in file_map:
+        raise ValueError("Could not find Master Room List worksheet XML in the workbook.")
+    sheet_root = ET.fromstring(file_map[MASTER_ROOM_LIST_SHEET_XML_PATH])
+    sheet_data = sheet_root.find("m:sheetData", NS)
+    if sheet_data is None:
+        raise ValueError("Workbook sheet is missing sheetData.")
+    text_style_template = None
+    area_style_template = None
+    text_template_cell = sheet_root.find(".//m:c[@r='E16']", NS)
+    area_template_cell = sheet_root.find(".//m:c[@r='G16']", NS)
+    if text_template_cell is not None:
+        text_style_template = text_template_cell.attrib.get("s")
+    if area_template_cell is not None:
+        area_style_template = area_template_cell.attrib.get("s")
+    max_rows = MASTER_ROOM_LIST_SPACE_MAX_ROWS
+    start_row = MASTER_ROOM_LIST_SPACE_START_ROW
+    for index in range(max_rows):
+        row_number = start_row + index
+        row = _ensure_row(sheet_data, row_number)
+        name_ref = f"D{row_number}"
+        area_ref = f"G{row_number}"
+        if index < len(spaces):
+            space_name, space_data = spaces[index]
+            _set_inline_string_cell(row, name_ref, space_name, style=text_style_template)
+            _set_numeric_cell(row, area_ref, float(space_data["area_sqft"]), style=area_style_template)
+        else:
+            _set_inline_string_cell(row, name_ref, "", style=text_style_template)
+            _set_numeric_cell(row, area_ref, None, style=area_style_template)
+    file_map[MASTER_ROOM_LIST_SHEET_XML_PATH] = ET.tostring(sheet_root, encoding="utf-8", xml_declaration=True)
+    _save_zip_file_map(file_map, output_workbook_path)
+    return {
+        "target_sheet": "Master Room List",
+        "target_table": "Space Type Table",
+        "rows_available": max_rows,
+        "spaces_found": len(spaces),
+        "spaces_written": min(len(spaces), max_rows),
+        "spaces_truncated": max(len(spaces) - max_rows, 0),
+        "output_workbook": str(output_workbook_path),
+    }
+
+
+def populate_ecm_data_from_reports(
+    sim_text: str,
+    workbook_path: Path,
+    model_run_type: str,
+    output_workbook_path: Path,
+) -> Dict[str, object]:
+    """Populate ECM Data sheet from BEPS + ES-D results for Baseline/Proposed/ECM-1..7."""
+    normalized_model_run_type = model_run_type.strip().upper()
+    if normalized_model_run_type not in ECM_DATA_MODEL_START_ROWS:
+        raise ValueError(
+            "Unsupported model run type for ECM Data. Supported: Baseline, Proposed, ECM-1..ECM-7 "
+            "(Baseline-2 and Baseline-3 are intentionally ignored)."
+        )
+    beps_result = extract_beps_report(sim_text)
+    es_d_result = extract_es_d_energy_cost_summary(sim_text)
+    elec_totals = beps_result["totals_by_fuel"]["electricity"]
+    gas_totals = beps_result["totals_by_fuel"]["natural_gas"]
+    elec_unit = elec_totals["unit"]
+    gas_unit = gas_totals["unit"]
+    end_use_values_kbtu: Dict[str, float] = {}
+    fuel_conflicts: List[str] = []
+    for beps_column, target_column in BEPS_TO_ECM_END_USE_COLUMNS.items():
+        elec_value = float(elec_totals["by_end_use"][beps_column])
+        gas_value = float(gas_totals["by_end_use"][beps_column])
+        elec_kbtu = _to_kbtu(elec_value, elec_unit) if abs(elec_value) > 1e-9 else 0.0
+        gas_kbtu = _to_kbtu(gas_value, gas_unit) if abs(gas_value) > 1e-9 else 0.0
+        if abs(elec_kbtu) > 1e-9 and abs(gas_kbtu) > 1e-9:
+            fuel_conflicts.append(beps_column)
+            continue
+        end_use_values_kbtu[target_column] = elec_kbtu if abs(elec_kbtu) > 1e-9 else gas_kbtu
+    if fuel_conflicts:
+        raise ValueError(
+            "Each BEPS end use is expected to have a single fuel type; found both electricity and gas for: "
+            + ", ".join(fuel_conflicts)
+        )
+    total_electric_kbtu = _to_kbtu(float(elec_totals["by_end_use"]["TOTAL"]), elec_unit)
+    total_gas_kbtu = _to_kbtu(float(gas_totals["by_end_use"]["TOTAL"]), gas_unit)
+    total_energy_kbtu = total_electric_kbtu + total_gas_kbtu
+    utility_rates = es_d_result["utility_rates"]
+    elec_virtual_rate = None
+    gas_virtual_rate = None
+    for rate_data in utility_rates.values():
+        unit = str(rate_data["unit"]).upper()
+        if unit == "KWH" and elec_virtual_rate is None:
+            elec_virtual_rate = float(rate_data["virtual_rate"])
+        elif unit == "THERM" and gas_virtual_rate is None:
+            gas_virtual_rate = float(rate_data["virtual_rate"])
+    if elec_virtual_rate is None or gas_virtual_rate is None:
+        raise ValueError("Could not find ES-D virtual rates for both electricity (KWH) and gas (THERM).")
+    elec_rate_per_kbtu = elec_virtual_rate / KBTU_PER_UNIT["KWH"]
+    gas_rate_per_kbtu = gas_virtual_rate / KBTU_PER_UNIT["THERM"]
+    elec_cost = total_electric_kbtu * elec_rate_per_kbtu
+    gas_cost = total_gas_kbtu * gas_rate_per_kbtu
+    total_cost = elec_cost + gas_cost
+    ET.register_namespace("", MAIN_NS)
+    file_map = _load_zip_file_map(workbook_path)
+    if ECM_DATA_SHEET_XML_PATH not in file_map:
+        raise ValueError("Could not find ECM Data worksheet XML in workbook.")
+    sheet_root = ET.fromstring(file_map[ECM_DATA_SHEET_XML_PATH])
+    sheet_data = sheet_root.find("m:sheetData", NS)
+    if sheet_data is None:
+        raise ValueError("ECM Data sheet is missing sheetData.")
+    section_start = ECM_DATA_MODEL_START_ROWS[normalized_model_run_type]
+    energy_row_number = section_start + 4
+    demand_row_number = section_start + 5
+    total_elec_row_number = section_start + 6
+    total_gas_row_number = section_start + 7
+    total_energy_row_number = section_start + 8
+    energy_row = _ensure_row(sheet_data, energy_row_number)
+    demand_row = _ensure_row(sheet_data, demand_row_number)
+    total_elec_row = _ensure_row(sheet_data, total_elec_row_number)
+    total_gas_row = _ensure_row(sheet_data, total_gas_row_number)
+    total_energy_row = _ensure_row(sheet_data, total_energy_row_number)
+    for col in "BCDEFGHIJKLMNOPQRST":
+        _set_numeric_cell(energy_row, f"{col}{energy_row_number}", None)
+        _set_numeric_cell(demand_row, f"{col}{demand_row_number}", None)
+    for col, value in end_use_values_kbtu.items():
+        _set_numeric_cell(energy_row, f"{col}{energy_row_number}", value)
+    _set_numeric_cell(total_elec_row, f"B{total_elec_row_number}", total_electric_kbtu)
+    _set_numeric_cell(total_gas_row, f"B{total_gas_row_number}", total_gas_kbtu)
+    _set_numeric_cell(total_energy_row, f"B{total_energy_row_number}", total_energy_kbtu)
+    _set_numeric_cell(total_elec_row, f"D{total_elec_row_number}", elec_cost)
+    _set_numeric_cell(total_gas_row, f"D{total_gas_row_number}", gas_cost)
+    _set_numeric_cell(total_energy_row, f"D{total_energy_row_number}", total_cost)
+    _set_numeric_cell(total_elec_row, f"F{total_elec_row_number}", elec_rate_per_kbtu)
+    _set_numeric_cell(total_gas_row, f"F{total_gas_row_number}", gas_rate_per_kbtu)
+    file_map[ECM_DATA_SHEET_XML_PATH] = ET.tostring(sheet_root, encoding="utf-8", xml_declaration=True)
+    _save_zip_file_map(file_map, output_workbook_path)
+    return {
+        "sheet": "ECM Data",
+        "model_run_type": model_run_type,
+        "section_start_row": section_start,
+        "end_use_columns_written": sorted(end_use_values_kbtu.keys()),
+        "left_blank_columns": ECM_OPTIONAL_BLANK_COLUMNS,
+        "total_electric_kbtu": total_electric_kbtu,
+        "total_gas_kbtu": total_gas_kbtu,
+        "total_energy_kbtu": total_energy_kbtu,
+        "elec_virtual_rate_per_kbtu": elec_rate_per_kbtu,
+        "gas_virtual_rate_per_kbtu": gas_rate_per_kbtu,
+        "elec_cost": elec_cost,
+        "gas_cost": gas_cost,
+        "total_cost": total_cost,
+        "output_workbook": str(output_workbook_path),
+    }
+
+
+def check_master_room_list_space_type_table_match(sim_text: str, workbook_path: Path) -> Dict[str, object]:
+    """Compare LV-B spaces against existing Master Room List Space Type Table values."""
+    lv_b_result = extract_lv_b_spaces(sim_text)
+    expected_spaces = list(lv_b_result["spaces"].items())[:MASTER_ROOM_LIST_SPACE_MAX_ROWS]
+    sheet_root = _load_master_room_list_sheet(workbook_path)
+    sheet_data = sheet_root.find("m:sheetData", NS)
+    if sheet_data is None:
+        raise ValueError("Workbook sheet is missing sheetData.")
+    mismatches: List[Dict[str, object]] = []
+    compared_rows = 0
+    for index in range(MASTER_ROOM_LIST_SPACE_MAX_ROWS):
+        row_number = MASTER_ROOM_LIST_SPACE_START_ROW + index
+        row = sheet_data.find(f"m:row[@r='{row_number}']", NS)
+        existing_name = ""
+        existing_area = None
+        if row is not None:
+            existing_name = _read_cell_text(row, f"D{row_number}").strip()
+            existing_area = _read_cell_float(row, f"G{row_number}")
+        if index < len(expected_spaces):
+            expected_name, expected_space_data = expected_spaces[index]
+            expected_area = float(expected_space_data["area_sqft"])
+            compared_rows += 1
+            name_matches = existing_name == expected_name
+            area_matches = existing_area is not None and abs(existing_area - expected_area) < 1e-6
+            if not (name_matches and area_matches):
+                mismatches.append(
+                    {
+                        "row": row_number,
+                        "expected_space_name": expected_name,
+                        "existing_space_name": existing_name,
+                        "expected_area_sqft": expected_area,
+                        "existing_area_sqft": existing_area,
+                    }
+                )
+    return {
+        "target_sheet": "Master Room List",
+        "target_table": "Space Type Table",
+        "rows_checked": compared_rows,
+        "spaces_compared": len(expected_spaces),
+        "space_type_table_match": len(mismatches) == 0,
+        "mismatch_count": len(mismatches),
+        "mismatches": mismatches,
+    }
+
+
+def resolve_model_run_type(cli_model_run_type: str | None) -> str:
+    """Resolve model run type from CLI first, then environment, defaulting to Baseline."""
+    if cli_model_run_type and cli_model_run_type.strip():
+        return cli_model_run_type.strip()
+    env_value = os.getenv("MODEL_RUN_TYPE", "").strip()
+    if env_value:
+        return env_value
+    return "Baseline"
 def extract_es_d_energy_cost_summary(sim_text: str) -> Dict[str, object]:
     """Extract utility-rate virtual rate, metered unit, and total charge from ES-D."""
     lines = sim_text.splitlines()
@@ -620,8 +977,71 @@ def main() -> None:
         default=2,
         help="JSON indentation level for output (default: 2)",
     )
+    parser.add_argument(
+        "--populate-master-room-list",
+        type=Path,
+        help="Path to Building Performance Assumptions .xlsm used for Space Type Table actions.",
+    )
+    parser.add_argument(
+        "--output-workbook",
+        type=Path,
+        help="Output path for updated workbook (required for Baseline writes).",
+    )
+    parser.add_argument(
+        "--model-run-type",
+        type=str,
+        help="Model run type from automation input (e.g., Baseline, Proposed, ECM-1).",
+    )
+    parser.add_argument(
+        "--update-ecm-data",
+        type=Path,
+        help="Path to workbook .xlsm where ECM Data should be populated from BEPS/ES-D.",
+    )
     args = parser.parse_args()
     sim_text = args.sim_file.read_text(errors="ignore")
+    if args.update_ecm_data:
+        if not args.output_workbook:
+            raise ValueError("--output-workbook is required when using --update-ecm-data.")
+        model_run_type = resolve_model_run_type(args.model_run_type)
+        result = populate_ecm_data_from_reports(
+            sim_text=sim_text,
+            workbook_path=args.update_ecm_data,
+            model_run_type=model_run_type,
+            output_workbook_path=args.output_workbook,
+        )
+        print(json.dumps(result, indent=args.indent))
+        return
+    if args.populate_master_room_list:
+        model_run_type = resolve_model_run_type(args.model_run_type)
+        normalized_model_run_type = model_run_type.upper()
+        is_baseline = normalized_model_run_type == "BASELINE"
+        if is_baseline:
+            if not args.output_workbook:
+                raise ValueError("--output-workbook is required for Baseline when using --populate-master-room-list.")
+            result = populate_master_room_list_space_type_table(
+                sim_text=sim_text,
+                workbook_path=args.populate_master_room_list,
+                output_workbook_path=args.output_workbook,
+            )
+            result.update(
+                {
+                    "model_run_type": model_run_type,
+                    "is_baseline": True,
+                    "space_type_table_match": True,
+                }
+            )
+        else:
+            comparison_result = check_master_room_list_space_type_table_match(
+                sim_text=sim_text,
+                workbook_path=args.populate_master_room_list,
+            )
+            result = {
+                "model_run_type": model_run_type,
+                "is_baseline": False,
+                **comparison_result,
+            }
+        print(json.dumps(result, indent=args.indent))
+        return
     if args.report == "beps":
         result = extract_beps_report(sim_text)
     elif args.report == "lv-b":
