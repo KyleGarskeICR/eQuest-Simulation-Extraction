@@ -1,0 +1,61 @@
+(.venv) PS A:\Users\kyleg\PycharmProjects\eQuest-Simulation-Extraction> powershell -ExecutionPolicy Bypass -File .\local_test_sequence.ps1
+Python 3.13.9
+usage: equest_extractor.py [-h] [--report {beps,lv-b,lv-d,lv-i,ls-a,lv-m,es-d,ps-h,all}] [--indent INDENT] [--populate-master-room-list POPULATE_MASTER_ROOM_LIST] [--output-workbook OUTPUT_WORKBOOK] [--model-run-type MODEL_RUN_TYPE] [--update-ecm-data UPDATE_ECM_DATA] sim_file
+
+Extract BEPS, LV-B, LV-D, LV-I, LS-A, LV-M, ES-D, and PS-H report data from an eQuest SIM file.
+
+positional arguments:
+  sim_file              Path to the eQuest .SIM file
+
+options:
+  -h, --help            show this help message and exit
+  --report {beps,lv-b,lv-d,lv-i,ls-a,lv-m,es-d,ps-h,all}
+                        Which report(s) to extract (default: all)
+  --indent INDENT       JSON indentation level for output (default: 2)
+  --populate-master-room-list POPULATE_MASTER_ROOM_LIST
+                        Path to Building Performance Assumptions .xlsm used for Space Type Table actions.
+  --output-workbook OUTPUT_WORKBOOK
+                        Output path for updated workbook (required for Baseline writes).
+  --model-run-type MODEL_RUN_TYPE
+                        Model run type from automation input (e.g., Baseline, Proposed, ECM-1).
+  --update-ecm-data UPDATE_ECM_DATA
+                        Path to workbook .xlsm where ECM Data should be populated from BEPS/ES-D.
+Traceback (most recent call last):
+  File "A:\Users\kyleg\PycharmProjects\eQuest-Simulation-Extraction\equest_extractor.py", line 1084, in <module>
+    main()
+    ~~~~^^
+  File "A:\Users\kyleg\PycharmProjects\eQuest-Simulation-Extraction\equest_extractor.py", line 1054, in main
+    result = extract_beps_report(sim_text)
+  File "A:\Users\kyleg\PycharmProjects\eQuest-Simulation-Extraction\equest_extractor.py", line 129, in extract_beps_report
+    raise ValueError("Could not find 'REPORT- BEPS' in the SIM file.")
+ValueError: Could not find 'REPORT- BEPS' in the SIM file.
+{
+  "target_sheet": "Master Room List",
+  "target_table": "Space Type Table",
+  "rows_available": 50,
+  "spaces_found": 172,
+  "spaces_written": 50,
+  "spaces_truncated": 122,
+  "output_workbook": "A:\\Users\\kyleg\\PycharmProjects\\eQuest-Simulation-Extraction\\output_files\\Building Performance Assumptions.master_room.updated.xlsm",
+  "model_run_type": "Baseline",
+  "is_baseline": true,
+  "space_type_table_match": true
+}
+Traceback (most recent call last):
+  File "A:\Users\kyleg\PycharmProjects\eQuest-Simulation-Extraction\equest_extractor.py", line 1084, in <module>
+    main()
+    ~~~~^^
+  File "A:\Users\kyleg\PycharmProjects\eQuest-Simulation-Extraction\equest_extractor.py", line 1014, in main
+    result = populate_ecm_data_from_reports(
+        sim_text=sim_text,
+    ...<2 lines>...
+        output_workbook_path=args.output_workbook,
+    )
+  File "A:\Users\kyleg\PycharmProjects\eQuest-Simulation-Extraction\equest_extractor.py", line 651, in populate_ecm_data_from_reports
+    beps_result = extract_beps_report(sim_text)
+  File "A:\Users\kyleg\PycharmProjects\eQuest-Simulation-Extraction\equest_extractor.py", line 129, in extract_beps_report
+    raise ValueError("Could not find 'REPORT- BEPS' in the SIM file.")
+ValueError: Could not find 'REPORT- BEPS' in the SIM file.
+Done. Output files:
+A:\Users\kyleg\PycharmProjects\eQuest-Simulation-Extraction\output_files\Building Performance Assumptions.master_room.updated.xlsm
+A:\Users\kyleg\PycharmProjects\eQuest-Simulation-Extraction\output_files\Building Performance Assumptions.ecm.updated.xlsm
