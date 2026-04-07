@@ -646,7 +646,15 @@ def _serialize_xml_preserving_ignorable_prefixes(root: ET.Element, original_xml_
     ignorable_prefixes = [prefix for prefix in ignorable_value.split() if prefix]
     if not ignorable_prefixes:
         return serialized_xml.encode("utf-8")
-    root_tag_end = serialized_xml.find(">")
+    declaration_end = 0
+    if serialized_xml.startswith("<?xml"):
+        declaration_close = serialized_xml.find("?>")
+        if declaration_close != -1:
+            declaration_end = declaration_close + 2
+    root_tag_start = serialized_xml.find("<", declaration_end)
+    if root_tag_start == -1:
+        return serialized_xml.encode("utf-8")
+    root_tag_end = serialized_xml.find(">", root_tag_start)
     if root_tag_end == -1:
         return serialized_xml.encode("utf-8")
     root_start = serialized_xml[:root_tag_end]
