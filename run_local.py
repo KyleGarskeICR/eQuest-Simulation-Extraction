@@ -8,6 +8,26 @@ import sys
 import tempfile
 from pathlib import Path
 
+SUPPORTED_MODEL_RUN_TYPES = {
+    "Baseline",
+    "Proposed",
+    "ECM-1",
+    "ECM-2",
+    "ECM-3",
+    "ECM-4",
+    "ECM-5",
+    "ECM-6",
+    "ECM-7",
+}
+
+
+def resolve_model_run_type(config: dict, default: str) -> str:
+    model_run_type = config.get("model_run_type", default)
+    if model_run_type not in SUPPORTED_MODEL_RUN_TYPES:
+        supported = ", ".join(["Baseline", "Proposed", "ECM-1", "ECM-2", "ECM-3", "ECM-4", "ECM-5", "ECM-6", "ECM-7"])
+        raise ValueError(f"Unsupported model_run_type: {model_run_type}. Supported options: {supported}")
+    return model_run_type
+
 
 def build_command(config: dict) -> list[str]:
     sim_file = config["sim_file"]
@@ -21,7 +41,7 @@ def build_command(config: dict) -> list[str]:
                 "--populate-master-room-list",
                 config["workbook_path"],
                 "--model-run-type",
-                config.get("model_run_type", "Baseline"),
+                resolve_model_run_type(config, "Baseline"),
                 "--output-workbook",
                 config["output_workbook_path"],
             ]
@@ -32,7 +52,7 @@ def build_command(config: dict) -> list[str]:
                 "--update-ecm-data",
                 config["workbook_path"],
                 "--model-run-type",
-                config.get("model_run_type", "ECM-1"),
+                resolve_model_run_type(config, "ECM-1"),
                 "--output-workbook",
                 config["output_workbook_path"],
             ]
@@ -55,8 +75,7 @@ def build_command(config: dict) -> list[str]:
 
 def build_combined_commands(config: dict, intermediate_output_path: str) -> list[list[str]]:
     """Build two-step command list: Master Room List then ECM Data."""
-    master_model_run_type = config.get("model_run_type", "Baseline")
-    ecm_model_run_type = config.get("ecm_model_run_type", master_model_run_type)
+    combined_model_run_type = resolve_model_run_type(config, "Baseline")
     sim_file = config["sim_file"]
     workbook_path = config["workbook_path"]
     output_workbook_path = config["output_workbook_path"]
@@ -68,7 +87,7 @@ def build_combined_commands(config: dict, intermediate_output_path: str) -> list
             "--populate-master-room-list",
             workbook_path,
             "--model-run-type",
-            master_model_run_type,
+            combined_model_run_type,
             "--output-workbook",
             intermediate_output_path,
         ],
@@ -79,7 +98,7 @@ def build_combined_commands(config: dict, intermediate_output_path: str) -> list
             "--update-ecm-data",
             intermediate_output_path,
             "--model-run-type",
-            ecm_model_run_type,
+            combined_model_run_type,
             "--output-workbook",
             output_workbook_path,
         ],
