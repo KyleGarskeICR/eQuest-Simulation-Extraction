@@ -15,6 +15,11 @@ try:
     from openpyxl import load_workbook
 except ImportError:  # pragma: no cover - optional dependency for safer workbook writes
     load_workbook = None
+
+# Writing macro-enabled workbooks with openpyxl can cause Excel recovery/repair
+# issues in some templates (named ranges/tables/external refs). Prefer XML-level
+# patching for write flows so untouched workbook parts are preserved byte-for-byte.
+USE_OPENPYXL_FOR_WRITES = False
 END_USE_COLUMNS = [
     "LIGHTS",
     "TASK LIGHTS",
@@ -817,8 +822,8 @@ def populate_master_room_list_space_type_table(
         raise ValueError(
             "Unsupported model run type for room data import. Supported: Baseline, Proposed, ECM-1..ECM-7."
         )
-    if load_workbook is not None:
-        workbook = load_workbook(workbook_path, keep_vba=True)
+    if USE_OPENPYXL_FOR_WRITES and load_workbook is not None:
+        workbook = load_workbook(workbook_path, keep_vba=True, keep_links=False)
         sheet = workbook["Master Room List"]
         raw_data_sheet = workbook["Raw Data - eQuest Import"]
         utility_sheet = workbook["Utilities"]
@@ -1068,8 +1073,8 @@ def populate_ecm_data_from_reports(
     gas_energy_row_number = section_start + 3
     gas_demand_row_number = section_start + 4
     writable_columns = "BCDEFGHIJKLMNOPQRS"
-    if load_workbook is not None:
-        workbook = load_workbook(workbook_path, keep_vba=True)
+    if USE_OPENPYXL_FOR_WRITES and load_workbook is not None:
+        workbook = load_workbook(workbook_path, keep_vba=True, keep_links=False)
         sheet = workbook["ECM Data"]
         for col in writable_columns:
             sheet[f"{col}{elec_energy_row_number}"] = None
