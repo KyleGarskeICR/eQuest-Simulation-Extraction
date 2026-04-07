@@ -4,9 +4,11 @@ import unittest
 import xml.etree.ElementTree as ET
 import zipfile
 from pathlib import Path
+from unittest.mock import patch
 
 from run_local import build_command
 from equest_extractor import (
+    _sanitize_xml_text,
     _parse_xml_with_registered_namespaces,
     _is_onedrive_reference,
     _to_onedrive_path,
@@ -30,6 +32,10 @@ from equest_extractor import (
 
 
 class TestBepsExtractor(unittest.TestCase):
+    def test_sanitize_xml_text_removes_invalid_control_characters(self):
+        raw = "Room\x0bName\x00With\x1fControls"
+        self.assertEqual(_sanitize_xml_text(raw), "RoomNameWithControls")
+
     def test_onedrive_reference_helpers(self):
         self.assertTrue(_is_onedrive_reference("onedrive:/folder/file.sim"))
         self.assertFalse(_is_onedrive_reference("/tmp/file.sim"))
@@ -71,6 +77,53 @@ class TestBepsExtractor(unittest.TestCase):
             }
         )
         self.assertIn("--populate-schedules", schedule_command)
+
+    def test_master_room_list_write_path_skips_openpyxl_to_preserve_workbook_parts(self):
+        sim_text = """
+        REPORT- LV-B Summary of Spaces
+        Spaces on floor: Level 1
+        010-Bike Storage                     1.0   INT   89.4    0.80    1.0    0.50   AIR-CHANGE  0.10      1038.1      12457.7
+        CONDITIONED FLOOR AREA          =     107479.2  SQFT
+        REPORT- ES-D Energy Cost Summary
+        UTILITY-RATE                       RESOURCE           METERS              UNITS/YR               ($)     ($/UNIT)   ALL YEAR?
+        Elec                               ELECTRICITY        EM1   COMM       636613. KWH           108224.       0.1700      YES
+        Gas                                NATURAL-GAS        FM1               50910. THERM          59056.       1.1600      YES
+        REPORT- END
+        """
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = Path(temp_dir) / "out.xlsm"
+            with patch("equest_extractor.load_workbook", side_effect=RuntimeError("openpyxl should not be used")) as mock_loader:
+                result = populate_master_room_list_space_type_table(
+                    sim_text=sim_text,
+                    workbook_path=Path("Building Performance Assumptions-v2.xlsm"),
+                    model_run_type="Baseline",
+                    output_workbook_path=output_path,
+                )
+            mock_loader.assert_not_called()
+            self.assertTrue(output_path.exists())
+            self.assertNotEqual(result.get("writer"), "openpyxl")
+
+    def test_ecm_data_write_path_skips_openpyxl_to_preserve_workbook_parts(self):
+        sim_text = """
+        REPORT- BEPS Building Energy Performance
+        COMM ELECTRICITY
+            MBTU          0.0      0.0     51.6      0.0      0.0      0.0     43.3      0.0      0.0      0.0      0.0     10.9     105.8
+        FM1  NATURAL-GAS
+            MBTU          0.0      0.0      0.0   2702.0      0.0      0.0      0.0      0.0      0.0      0.0   2389.0      0.0    5091.0
+        REPORT- END
+        """
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_path = Path(temp_dir) / "out.xlsm"
+            with patch("equest_extractor.load_workbook", side_effect=RuntimeError("openpyxl should not be used")) as mock_loader:
+                result = populate_ecm_data_from_reports(
+                    sim_text=sim_text,
+                    workbook_path=Path("Building Performance Assumptions-v2.xlsm"),
+                    model_run_type="Baseline",
+                    output_workbook_path=output_path,
+                )
+            mock_loader.assert_not_called()
+            self.assertTrue(output_path.exists())
+            self.assertNotEqual(result.get("writer"), "openpyxl")
 
     def test_extracts_all_beps_columns_and_totals_by_fuel(self):
         sim_text = """

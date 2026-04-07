@@ -15,6 +15,11 @@ try:
     from openpyxl import load_workbook
 except ImportError:  # pragma: no cover - optional dependency for safer workbook writes
     load_workbook = None
+
+# Writing macro-enabled workbooks with openpyxl can cause Excel recovery/repair
+# issues in some templates (named ranges/tables/external refs). Prefer XML-level
+# patching for write flows so untouched workbook parts are preserved byte-for-byte.
+USE_OPENPYXL_FOR_WRITES = False
 END_USE_COLUMNS = [
     "LIGHTS",
     "TASK LIGHTS",
@@ -109,6 +114,9 @@ MODEL_RUN_RAW_DATA_COLUMN_MAP = {
     "ECM-7": ("AE", "AF", "AG"),
 }
 UTILITY_RATES_SHEET_XML_PATH = "xl/worksheets/sheet7.xml"
+INVALID_XML_CHAR_PATTERN = re.compile(
+    r"[^\x09\x0A\x0D\x20-\uD7FF\uE000-\uFFFD]"
+)
 ECM_DATA_SHEET_XML_PATH = "xl/worksheets/sheet11.xml"
 ECM_DATA_MODEL_START_ROWS = {
     "BASELINE": 6,
@@ -565,7 +573,14 @@ def _set_inline_string_cell(row: ET.Element, cell_ref: str, value: str, style: s
     cell.attrib["t"] = "inlineStr"
     is_node = ET.SubElement(cell, f"{{{MAIN_NS}}}is")
     text_node = ET.SubElement(is_node, f"{{{MAIN_NS}}}t")
-    text_node.text = value
+    text_node.text = _sanitize_xml_text(value)
+
+
+def _sanitize_xml_text(value: str) -> str:
+    """Remove characters that are invalid in XML 1.0 text nodes."""
+    if not value:
+        return ""
+    return INVALID_XML_CHAR_PATTERN.sub("", value)
 
 
 def _set_numeric_cell(row: ET.Element, cell_ref: str, value: float | None, style: str | None = None) -> None:
@@ -817,8 +832,8 @@ def populate_master_room_list_space_type_table(
         raise ValueError(
             "Unsupported model run type for room data import. Supported: Baseline, Proposed, ECM-1..ECM-7."
         )
-    if load_workbook is not None:
-        workbook = load_workbook(workbook_path, keep_vba=True)
+    if USE_OPENPYXL_FOR_WRITES and load_workbook is not None:
+        workbook = load_workbook(workbook_path, keep_vba=True, keep_links=False)
         sheet = workbook["Master Room List"]
         raw_data_sheet = workbook["Raw Data - eQuest Import"]
         utility_sheet = workbook["Utilities"]
@@ -1068,8 +1083,8 @@ def populate_ecm_data_from_reports(
     gas_energy_row_number = section_start + 3
     gas_demand_row_number = section_start + 4
     writable_columns = "BCDEFGHIJKLMNOPQRS"
-    if load_workbook is not None:
-        workbook = load_workbook(workbook_path, keep_vba=True)
+    if USE_OPENPYXL_FOR_WRITES and load_workbook is not None:
+        workbook = load_workbook(workbook_path, keep_vba=True, keep_links=False)
         sheet = workbook["ECM Data"]
         for col in writable_columns:
             sheet[f"{col}{elec_energy_row_number}"] = None
