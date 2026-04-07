@@ -1461,19 +1461,21 @@ def extract_ps_h_details(sim_text: str) -> Dict[str, object]:
 
 
 def extract_schedule_table(sim_text: str) -> Dict[str, object]:
-    """Extract REPORT- SCHEDULES rows into a table-like structure."""
+    """Extract schedule rows from REPORT- LV-G (or REPORT- SCHEDULES) into a table-like structure."""
     lines = sim_text.splitlines()
     in_schedules = False
+    report_name = None
     header: List[str] | None = None
     rows: List[Dict[str, str]] = []
     for raw_line in lines:
         stripped = raw_line.strip()
         upper = stripped.upper()
-        if "REPORT- SCHEDULES" in upper:
+        if "REPORT- LV-G" in upper or "REPORT- SCHEDULES" in upper:
             in_schedules = True
+            report_name = "LV-G" if "REPORT- LV-G" in upper else "SCHEDULE"
             header = None
             continue
-        if in_schedules and upper.startswith("REPORT-") and "REPORT- SCHEDULES" not in upper:
+        if in_schedules and upper.startswith("REPORT-") and "REPORT- LV-G" not in upper and "REPORT- SCHEDULES" not in upper:
             break
         if not in_schedules or not stripped:
             continue
@@ -1487,7 +1489,7 @@ def extract_schedule_table(sim_text: str) -> Dict[str, object]:
             continue
         row = {header[idx]: parts[idx] for idx in range(len(header))}
         rows.append(row)
-    return {"report": "SCHEDULE", "rows": rows}
+    return {"report": report_name or "SCHEDULE", "rows": rows}
 
 
 def populate_equest_schedule_importer_table(
@@ -1495,9 +1497,32 @@ def populate_equest_schedule_importer_table(
     workbook_path: Path,
     output_workbook_path: Path,
 ) -> Dict[str, object]:
-    """Populate the eQuest Schedule Importer tab from REPORT- SCHEDULES."""
+    """Populate the eQuest Schedule Importer tab from REPORT- LV-G schedule rows."""
     schedule_result = extract_schedule_table(sim_text)
     rows = schedule_result["rows"]
+    if USE_OPENPYXL_FOR_WRITES and load_workbook is not None:
+        workbook = load_workbook(workbook_path, keep_vba=True, keep_links=False)
+        sheet = workbook["eQuest Schedule Importer"]
+        start_row = 2
+        max_rows = 79
+        for idx in range(max_rows):
+            row_number = start_row + idx
+            row_data = rows[idx] if idx < len(rows) else {}
+            sheet[f"A{row_number}"] = row_data.get("Schedule Name", "")
+            sheet[f"B{row_number}"] = row_data.get("Schedule Type", "")
+            for hour in range(1, 25):
+                col = _excel_column_name(13 + hour)
+                value = row_data.get(str(hour))
+                sheet[f"{col}{row_number}"] = float(value) if value not in (None, "") else None
+        workbook.save(output_workbook_path)
+        return {
+            "target_sheet": "eQuest Schedule Importer",
+            "target_table": "eQuest_Schedule_Importer",
+            "writer": "openpyxl",
+            "rows_written": min(len(rows), max_rows),
+            "rows_available": max_rows,
+            "output_workbook": str(output_workbook_path),
+        }
     ET.register_namespace("", MAIN_NS)
     file_map = _load_zip_file_map(workbook_path)
     schedule_sheet_path = "xl/worksheets/sheet16.xml"
