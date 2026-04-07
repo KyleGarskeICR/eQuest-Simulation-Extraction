@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from run_local import build_command
 from equest_extractor import (
+    _sanitize_xml_text,
     _parse_xml_with_registered_namespaces,
     _is_onedrive_reference,
     _to_onedrive_path,
@@ -31,6 +32,10 @@ from equest_extractor import (
 
 
 class TestBepsExtractor(unittest.TestCase):
+    def test_sanitize_xml_text_removes_invalid_control_characters(self):
+        raw = "Room\x0bName\x00With\x1fControls"
+        self.assertEqual(_sanitize_xml_text(raw), "RoomNameWithControls")
+
     def test_onedrive_reference_helpers(self):
         self.assertTrue(_is_onedrive_reference("onedrive:/folder/file.sim"))
         self.assertFalse(_is_onedrive_reference("/tmp/file.sim"))

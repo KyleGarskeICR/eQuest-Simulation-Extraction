@@ -114,6 +114,9 @@ MODEL_RUN_RAW_DATA_COLUMN_MAP = {
     "ECM-7": ("AE", "AF", "AG"),
 }
 UTILITY_RATES_SHEET_XML_PATH = "xl/worksheets/sheet7.xml"
+INVALID_XML_CHAR_PATTERN = re.compile(
+    r"[^\x09\x0A\x0D\x20-\uD7FF\uE000-\uFFFD]"
+)
 ECM_DATA_SHEET_XML_PATH = "xl/worksheets/sheet11.xml"
 ECM_DATA_MODEL_START_ROWS = {
     "BASELINE": 6,
@@ -570,7 +573,14 @@ def _set_inline_string_cell(row: ET.Element, cell_ref: str, value: str, style: s
     cell.attrib["t"] = "inlineStr"
     is_node = ET.SubElement(cell, f"{{{MAIN_NS}}}is")
     text_node = ET.SubElement(is_node, f"{{{MAIN_NS}}}t")
-    text_node.text = value
+    text_node.text = _sanitize_xml_text(value)
+
+
+def _sanitize_xml_text(value: str) -> str:
+    """Remove characters that are invalid in XML 1.0 text nodes."""
+    if not value:
+        return ""
+    return INVALID_XML_CHAR_PATTERN.sub("", value)
 
 
 def _set_numeric_cell(row: ET.Element, cell_ref: str, value: float | None, style: str | None = None) -> None:
